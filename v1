@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""
+CPU Monitoring for Jetson Edge Devices
+
+Collects CPU utilization metrics using jetson-stats (jtop).
+Students: Complete the TODOs to collect and visualize CPU metrics.
+
+Notes for students:
+- Run this on a Jetson (ARM) device only.
+- This script uses Matplotlib's non-interactive backend (Agg) so it can save plots
+  even on headless Jetson setups.
+- Your CSV must include timestamp, avgCPU, and per-core columns core0..coreN.
+"""
+
+import time
+import csv
+import argparse
+from pathlib import Path
+
+try:
+    from jtop import jtop
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
+    import matplotlib.pyplot as plt
+except ImportError as e:
+    print(f"Missing required package: {e}")
+    print("Install with: pip install jetson-stats matplotlib")
+    raise SystemExit(1)
+
+
+def getCPUCores(stats):
+    """
+    Extract CPU core utilization from jtop stats.
+    PROVIDED HELPER - handles different Jetson platform formats.
+
+    Handles both formats:
+    - Older Jetsons: stats['CPU'] is a list [core0, core1, ...]
+    - Thor/newer: Individual keys 'CPU1', 'CPU2', etc.
+
+    Args:
+        stats: jetson.stats dictionary from jtop
+
+    Returns:
+        List of CPU core utilization percentages
+    """
+    # Try new format first (individual CPU keys like 'CPU1', 'CPU2')
+    CPUKeys = sorted(
+        [k for k in stats.keys() if k.startswith('CPU') and k[3:].isdigit()],
+        key=lambda x: int(x[3:])
+    )
+    if CPUKeys:
+        return [stats[k] for k in CPUKeys]
+
+    # Fall back to old format (CPU as list)
+    CPUList = stats.get('CPU', [])
+    if isinstance(CPUList, list):
+        return CPUList
+
+    return []
+
+
+def collectCPUMetrics(durationSec=30, intervalSec=1.0):
+    """
+    Collect CPU metrics from Jetson using jtop.
+
+    Args:
+        durationSec: How long to collect data (seconds)
+        intervalSec: Sampling interval (seconds)
+
+    Returns:
+        List of dictionaries with CPU metrics
+    """
+    samples = []
+    startTime = time.time()
+
+    print(f"Collecting CPU metrics for {durationSec} seconds...")
+    print(f"Sampling every {intervalSec} seconds")
+
+    with jtop() as jetson:
+        nextSampleTime = startTime
+
+        while jetson.ok():
+            now = time.time()
+            timestamp = now - startTime
+
+            # Stop after durationSec seconds
+            if timestamp >= durationSec:
+                break
+
+            if now < nextSampleTime:
+                time.sleep(min(0.1, nextSampleTime - now))
+                continue
+
+            # Wait for stats to be ready: sometimes the first reads return empty CPU data
+            # (especially right after jtop starts).
+            # TODO 1: Extract CPU metrics from jtop
+            # Use the provided getCPUCores() helper function to get CPU core utilization.
+            # Then calculate the average CPU across all cores.
+            #
+            # Hint:
+            #   CPUCores = getCPUCores(jetson.stats)
+            #   avgCPU = sum(CPUCores) / len(CPUCores) if CPUCores else 0
+            CPUCores = getCPUCores(jetson.stats)  # REPLACE: Use getCPUCores(jetson.stats)
+            avgCPU = sum(CPUCores) / len(CPUCores) if CPUCores else 0 # REPLACE: Calculate average fro>
+
+            # If CPUCores is empty, consider sleeping briefly and continuing.
+            # (This prevents writing malformed samples.)
+            # Example:
+            if not CPUCores:
+                time.sleep(0.1)
+                continue
+
+            # TODO 2: Store sample data
+            # Create a dictionary with: timestamp, avgCPU, CPUCores
+            # Example:
+            #   sample = {'timestamp': timestamp, 'avgCPU': avgCPU, 'CPUCores': CPUCores}
+            sample = {
+                'timestamp': timestamp,
+                'avgCPU': avgCPU,
+                'CPUCores': CPUCores
+            }  # REPLACE: Fill with actual data
+
+            samples.append(sample)
+
+            # Print progress
+            print(f"t={timestamp:5.1f}s: Avg CPU={avgCPU:5.1f}%")
+
+            # Schedule next sample
+            nextSampleTime += intervalSec
+
+            # If you use a simpler approach instead of nextSampleTime scheduling:
+            # time.sleep(intervalSec)
+
+    print(f"Collected {len(samples)} samples")
+    return samples
+
+
+def saveCPUMetrics(samples, outputPath):
+    """
+    Save CPU metrics to a CSV file.
+
+    Args:
+        samples: List of metric dictionaries
+        outputPath: Path to output CSV file
+    """
+    if not samples:
+        print("No samples to save")
+        return
+
+    outputPath = Path(outputPath)
+    outputPath.parent.mkdir(parents=True, exist_ok=True)
+
+    # Determine number of cores to write.
+    #
+    # Common pitfall: using only the FIRST sample can produce numCores=0 if the first
+    # CPU read was empty. A robust approach is to use the maximum core count seen.
+    # The starter code below uses the first sample for simplicity; you may improve it.
+    numCores = len(samples[0].get('CPUCores', []))
+
+    # Create fieldnames
+    fieldnames = ['timestamp', 'avgCPU'] + [f'core{i}' for i in range(numCores)]
+
+    with open(outputPath, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for sample in samples:
+            row = {
+                'timestamp': sample['timestamp'],
+                'avgCPU': sample['avgCPU']
+            }
+
+            # Add per-core data
+            for i, coreUtil in enumerate(sample['CPUCores']):
+                row[f'core{i}'] = coreUtil
+
+            writer.writerow(row)
+
+
+    print(f"Saved metrics to: {outputPath}")
+
+
+def plotCPUMetrics(samples, outputPath, platformName="Jetson"):
+    """
+    Create visualization of CPU metrics.
+
+    Args:
+        samples: List of metric dictionaries
+        outputPath: Path to output PNG file
+        platformName: Name of Jetson platform
+    """
+    if not samples:
+        print("No samples to plot")
+        return
+
+    outputPath = Path(outputPath)
+    outputPath.parent.mkdir(parents=True, exist_ok=True)
+
+    # Extract data
+    timestamps = [s['timestamp'] for s in samples]
+    avgCPUs = [s['avgCPU'] for s in samples]
+    meanCPU = sum(avgCPUs) / len(avgCPUs) if avgCPUs else 0
+
+    # Create figure
+    plt.figure(figsize=(12, 6))
+
+    # TODO 3: Plot average CPU utilization
+    # Create a line plot of avgCPUs vs timestamps.
+    # Add a horizontal line for the mean.
+    # Add labels, title, legend, and grid.
+    # Set y-axis limits to [0, 100].
+    #
+    # Starter snippet:
+    plt.plot(timestamps, avgCPUs, linewidth=2, label='Avg CPU')
+    plt.axhline(y=meanCPU, linestyle='--', label=f'Mean: {meanCPU:.1f}%')
+    plt.xlabel('Time (seconds)')
+    plt.ylabel('CPU Utilization (%)')
+    plt.title(f'CPU Utilization - {platformName}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim([0, 100])
+    pass  # REPLACE with actual plotting code
+
+    plt.tight_layout()
+    plt.savefig(outputPath, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved plot to: {outputPath}")
+
+
+def getPlatformName():
+    """
+    Get the Jetson platform name from jtop.
+
+    Returns:
+        String with platform name (e.g., "Jetson AGX Orin", "NVIDIA Jetson AGX Thor")
+    """
+   try:
+        with jtop() as jetson:
+            if jetson.ok():
+                # Try to get hardware model name (works on Thor and newer)
+                hardware = jetson.board.get('hardware', {})
+                if isinstance(hardware, dict):
+                    model = hardware.get('Model', '')
+                    if model:
+                        return model
+
+                # Fallback to platform info
+                platform = jetson.board.get('platform', {})
+                if isinstance(platform, dict):
+                    return platform.get('Machine', 'Jetson Unknown')
+
+                return str(platform) if platform else 'Jetson Unknown.'
+    except Exception as e:
+        print(f"Could not get platform name: {e}")
+
+    return "Jetson Unknown."
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Monitor CPU metrics on Jetson')
+    parser.add_argument('--duration', type=float, default=30,
+                        help='Duration to collect data (seconds)')
+    parser.add_argument('--interval', type=float, default=1.0,
+                        help='Sampling interval (seconds)')
+    parser.add_argument('--output', type=str, default='logs/CPUMetrics.csv',
+                        help='Output CSV file path')
+
+    args = parser.parse_args()
+
+    # Get platform name
+    platformName = getPlatformName()
+    print(f"Platform: {platformName}")
+
+    # Collect metrics
+    samples = collectCPUMetrics(args.duration, args.interval)
+
+    if not samples:
+        print("No data collected. Check if jtop is running.")
+        return
+
+    # Save CSV
+    saveCPUMetrics(samples, args.output)
+
+    # Create visualization
+    plotPath = Path(args.output).parent / 'CPUMetrics.png'
+    plotCPUMetrics(samples, plotPath, platformName)
+
+    print("\nSummary:")
+    avgCPUs = [s['avgCPU'] for s in samples]
+    print(f"  Samples: {len(samples)}")
+    print(f"  Avg CPU: {sum(avgCPUs)/len(avgCPUs):.1f}%")
+    print(f"  Min CPU: {min(avgCPUs):.1f}%")
+    print(f"  Max CPU: {max(avgCPUs):.1f}%")
+
+
+if __name__ == '__main__':
+    main()
+
